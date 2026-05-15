@@ -1,0 +1,14 @@
+checkpoints/
+checkpoints_v2/
+runs/
+runs_v2/
+*.pth
+*.onnx
+__pycache__/
+.venv/
+data/
+python/benchmark_results
+torch_cache/
+checkpoints_reds_3x/
+runs_reds_3
+upscaledREDS.mp4
