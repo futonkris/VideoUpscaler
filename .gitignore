@@ -11,4 +11,3 @@ python/benchmark_results
 torch_cache/
 checkpoints_reds_3x/
 runs_reds_3
-upscaledREDS.mp4
