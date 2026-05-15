@@ -9,5 +9,4 @@ __pycache__/
 data/
 python/benchmark_results
 torch_cache/
-checkpoints_reds_3x/
 runs_reds_3
