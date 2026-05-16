@@ -6,7 +6,6 @@ runs_v2/
 *.onnx
 __pycache__/
 .venv/
-data/
 python/benchmark_results
 torch_cache/
 runs_reds_3
