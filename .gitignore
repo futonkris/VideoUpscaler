@@ -11,3 +11,6 @@ torch_cache/
 runs_reds_3
 esgranUpscale/frames_in
 esgranUpscale/frames_out
+data/
+runs_3_deg/
+checkpoints_3x_deg/

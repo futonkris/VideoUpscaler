@@ -1,3 +1,4 @@
+import io
 import random
 from pathlib import Path
 
@@ -37,6 +38,68 @@ def _apply_aug_flow(flow: torch.Tensor, aug: dict) -> torch.Tensor:
         flow = torch.stack([-v, u], dim=0)
     return flow
 
+def _gaussian_kernel_2d(size: int, sigma: float) -> torch.Tensor:
+    coords = torch.arange(size, dtype=torch.float32) - (size - 1) / 2.0
+    g = torch.exp(-(coords ** 2) / (2.0 * sigma ** 2))
+    g = g / g.sum()
+    return g.unsqueeze(0) * g.unsqueeze(1)
+
+def _apply_gaussian_blur(img: torch.Tensor, sigma: float) -> torch.Tensor:
+    if sigma < 1e-3:
+        return img
+    size = max(3, int(2 * round(3 * sigma) + 1))
+    if size % 2 == 0:
+        size += 1
+    kernel = _gaussian_kernel_2d(size, sigma).to(img.device, img.dtype)
+    kernel = kernel.expand(3, 1, size, size)
+    pad = size // 2
+    padded = F.pad(img.unsqueeze(0), (pad, pad, pad, pad), mode="reflect")
+    return F.conv2d(padded, kernel, groups=3).squeeze(0)
+
+def _apply_gaussian_noise(img: torch.Tensor, sigma_255: float) -> torch.Tensor:
+    if sigma_255 < 1e-3:
+        return img
+    noise = torch.randn_like(img) * (sigma_255 / 255.0)
+    return (img + noise).clamp(0, 1)
+
+def _apply_jpeg_compression(img: torch.Tensor, quality: int) -> torch.Tensor:
+    arr = (img.permute(1, 2, 0).cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+    pil = Image.fromarray(arr)
+    buf = io.BytesIO()
+    pil.save(buf, format="JPEG", quality=int(quality))
+    buf.seek(0)
+    decoded = np.asarray(Image.open(buf).convert("RGB"))
+    return torch.from_numpy(decoded.copy()).permute(2, 0, 1).float() / 255.0
+
+def _sample_degradation_params(mode: str) -> dict:
+    if mode == "none":
+        return {"apply": False}
+    if mode == "mild":
+        return {
+            "apply": True,
+            "blur_sigma":   random.uniform(0.3, 1.5),
+            "noise_sigma":  random.uniform(1.0, 8.0) if random.random() < 0.5 else 0.0,
+            "jpeg_quality": random.randint(60, 95) if random.random() < 0.7 else 0,
+        }
+    if mode == "heavy":
+        return {
+            "apply": True,
+            "blur_sigma":   random.uniform(0.4, 2.5),
+            "noise_sigma":  random.uniform(1.0, 20.0) if random.random() < 0.75 else 0.0,
+            "jpeg_quality": random.randint(35, 90) if random.random() < 0.85 else 0,
+        }
+    raise ValueError(f"unknown degradation_mode {mode}. use none, mild, or heavy")
+
+def _apply_degradation(img: torch.Tensor, params: dict) -> torch.Tensor:
+    if not params.get("apply", False):
+        return img
+    img = _apply_gaussian_blur(img, params["blur_sigma"])
+    if params["noise_sigma"] > 0:
+        img = _apply_gaussian_noise(img, params["noise_sigma"])
+    if params["jpeg_quality"] > 0:
+        img = _apply_jpeg_compression(img, params["jpeg_quality"])
+    return img.clamp(0, 1)
+
 class Vimeo90KDataset(Dataset):
     def __init__(
         self,
@@ -46,6 +109,7 @@ class Vimeo90KDataset(Dataset):
         patch_size: int = 64,
         augment: bool = True,
         use_precomputed_flow: bool = False,
+        degradation_mode: str = "none",
     ):
         super().__init__()
         self.data_root = Path(data_root)
@@ -54,6 +118,7 @@ class Vimeo90KDataset(Dataset):
         self.augment = augment and split == "train"
         self.split = split
         self.use_precomputed_flow = use_precomputed_flow
+        self.degradation_mode = degradation_mode if split == "train" else "none"
 
         list_file = self.data_root / f"tri_{'train' if split == 'train' else 'test'}list.txt"
         if not list_file.exists():
@@ -140,6 +205,10 @@ class Vimeo90KDataset(Dataset):
                 flow_back = _apply_aug_flow(flow_back, aug)
                 flow_fwd = _apply_aug_flow(flow_fwd, aug)
 
+        if self.degradation_mode != "none":
+            deg = _sample_degradation_params(self.degradation_mode)
+            lr_frames = [_apply_degradation(f, deg) for f in lr_frames]
+
         result = {
             "lr_prev": lr_frames[0],
             "lr_curr": lr_frames[1],
@@ -163,6 +232,7 @@ class REDSDataset(Dataset):
         num_frames: int = 3,
         augment: bool = True,
         use_precomputed_flow: bool = False,
+        degradation_mode: str = "none",
     ):
         super().__init__()
         if use_precomputed_flow:
@@ -176,6 +246,7 @@ class REDSDataset(Dataset):
         self.augment = augment and split == "train"
         self.split = split
         self.use_precomputed_flow = False
+        self.degradation_mode = degradation_mode if split == "train" else "none"
 
         sharp_dir = self.data_root / "train_sharp"
         if not sharp_dir.exists():
@@ -247,6 +318,10 @@ class REDSDataset(Dataset):
             lr_frames = [_apply_aug_image(f, aug) for f in lr_frames]
             hr_frames = [_apply_aug_image(f, aug) for f in hr_frames]
 
+        if self.degradation_mode != "none":
+            deg = _sample_degradation_params(self.degradation_mode)
+            lr_frames = [_apply_degradation(f, deg) for f in lr_frames]
+
         return {
             "lr_prev": lr_frames[0],
             "lr_curr": lr_frames[1],
@@ -267,6 +342,7 @@ def build_dataloader(
     use_precomputed_flow: bool = False,
     vimeo_root: str | None = None,
     reds_root: str | None = None,
+    degradation_mode: str = "none",
 ) -> torch.utils.data.DataLoader:
     name = dataset_name.lower()
     if name == "combined":
@@ -280,11 +356,11 @@ def build_dataloader(
             )
         ds_vimeo = Vimeo90KDataset(
             data_root=vimeo_root, scale=scale, split=split, patch_size=patch_size,
-            use_precomputed_flow=False,
+            use_precomputed_flow=False, degradation_mode=degradation_mode,
         )
         ds_reds = REDSDataset(
             data_root=reds_root, scale=scale, split=split, patch_size=patch_size,
-            use_precomputed_flow=False,
+            use_precomputed_flow=False, degradation_mode=degradation_mode,
         )
         dataset = torch.utils.data.ConcatDataset([ds_vimeo, ds_reds])
         print(f"combined {split} {len(dataset)} samples ("
@@ -293,11 +369,13 @@ def build_dataloader(
         dataset = Vimeo90KDataset(
             data_root=data_root, scale=scale, split=split, patch_size=patch_size,
             use_precomputed_flow=use_precomputed_flow,
+            degradation_mode=degradation_mode,
         )
     elif name == "reds":
         dataset = REDSDataset(
             data_root=data_root, scale=scale, split=split, patch_size=patch_size,
             use_precomputed_flow=use_precomputed_flow,
+            degradation_mode=degradation_mode,
         )
     else:
         raise ValueError(f"no {dataset_name}. use either vimeo or REDS")

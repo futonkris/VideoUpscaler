@@ -43,6 +43,9 @@ def parse_args():
     parser.add_argument("--use_precomputed_flow", action="store_true",
                         help="Load precomputed RAFT flows from disk instead of computing on-the-fly. "
                              "Run precompute.py first.")
+    parser.add_argument("--degradation_mode", type=str, default="none",
+                        choices=["none", "mild", "heavy"],
+                        help="LR degradation pipeline (Real-ESRGAN style). Only applied at training time.")
     parser.add_argument("--amp", action="store_true", default=True, help="Mixed precision")
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
@@ -275,12 +278,14 @@ def main():
         args.batch_size, args.patch_size, args.num_workers,
         use_precomputed_flow=args.use_precomputed_flow,
         vimeo_root=args.vimeo_root, reds_root=args.reds_root,
+        degradation_mode=args.degradation_mode,
     )
     val_loader = build_dataloader(
         args.dataset, args.data_root, args.scale, "test",
         batch_size=4, patch_size=args.patch_size, num_workers=args.num_workers,
         use_precomputed_flow=args.use_precomputed_flow,
         vimeo_root=args.vimeo_root, reds_root=args.reds_root,
+        degradation_mode="none",
     )
 
     start_epoch = 0
