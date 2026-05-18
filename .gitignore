@@ -14,3 +14,5 @@ esgranUpscale/frames_out
 data/
 runs_3_deg/
 checkpoints_3x_deg/
+runs_game/
+checkpoints_game/

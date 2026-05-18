@@ -331,6 +331,117 @@ class REDSDataset(Dataset):
             "hr_next": hr_frames[2] if self.num_frames > 2 else hr_frames[1],
         }
 
+class GameCaptureDataset(Dataset):
+    def __init__(
+        self,
+        data_root: str,
+        scale: int = 4,
+        split: str = "train",
+        patch_size: int = 64,
+        num_frames: int = 3,
+        augment: bool = True,
+        use_precomputed_flow: bool = False,
+        degradation_mode: str = "none",
+        val_start: int = 450,
+    ):
+        super().__init__()
+        if use_precomputed_flow:
+            raise NotImplementedError(
+                "no precomputed flow for game capture yet run with false"
+            )
+        self.data_root = Path(data_root)
+        self.scale = scale
+        self.patch_size = patch_size
+        self.num_frames = num_frames
+        self.augment = augment and split == "train"
+        self.split = split
+        self.use_precomputed_flow = False
+        self.degradation_mode = degradation_mode if split == "train" else "none"
+        self.val_start = val_start
+
+        frames_dir = self.data_root / "train"
+        if not frames_dir.exists():
+            raise FileNotFoundError(
+                f"game capture data not found {frames_dir}\n"
+                f"format into REDS format"
+            )
+
+        all_seqs = sorted([d.name for d in frames_dir.iterdir() if d.is_dir()])
+        if split == "train":
+            self.sequences = [s for s in all_seqs if int(s) < val_start]
+        else:
+            self.sequences = [s for s in all_seqs if int(s) >= val_start]
+
+        self.samples = []
+        for seq in self.sequences:
+            seq_dir = frames_dir / seq
+            frames = sorted(seq_dir.glob("*.png"))
+            num_available = len(frames)
+            for start in range(num_available - num_frames + 1):
+                self.samples.append((seq, start))
+
+        print(f"GameCapture {split} {len(self.samples)} samples from {len(self.sequences)} sequences")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        seq, start = self.samples[idx]
+        frames_dir = self.data_root / "train" / seq
+
+        hr_frames_full = []
+        for i in range(self.num_frames):
+            frame_path = frames_dir / f"{start + i:08d}.png"
+            img = Image.open(frame_path).convert("RGB")
+            hr_frames_full.append(transforms.ToTensor()(img))
+
+        lr_frames_full = [
+            F.interpolate(
+                f.unsqueeze(0), scale_factor=1.0 / self.scale, mode="bicubic",
+                align_corners=False, antialias=True,
+            ).squeeze(0).clamp(0, 1)
+            for f in hr_frames_full
+        ]
+
+        _, lr_H, lr_W = lr_frames_full[0].shape
+        if self.split == "train":
+            top_lr = random.randint(0, lr_H - self.patch_size)
+            left_lr = random.randint(0, lr_W - self.patch_size)
+        else:
+            top_lr = (lr_H - self.patch_size) // 2
+            left_lr = (lr_W - self.patch_size) // 2
+
+        top_hr = top_lr * self.scale
+        left_hr = left_lr * self.scale
+        hr_patch = self.patch_size * self.scale
+
+        lr_frames = [
+            f[:, top_lr:top_lr + self.patch_size, left_lr:left_lr + self.patch_size]
+            for f in lr_frames_full
+        ]
+        hr_frames = [
+            f[:, top_hr:top_hr + hr_patch, left_hr:left_hr + hr_patch]
+            for f in hr_frames_full
+        ]
+
+        if self.augment:
+            aug = _sample_aug()
+            lr_frames = [_apply_aug_image(f, aug) for f in lr_frames]
+            hr_frames = [_apply_aug_image(f, aug) for f in hr_frames]
+
+        if self.degradation_mode != "none":
+            deg = _sample_degradation_params(self.degradation_mode)
+            lr_frames = [_apply_degradation(f, deg) for f in lr_frames]
+
+        return {
+            "lr_prev": lr_frames[0],
+            "lr_curr": lr_frames[1],
+            "lr_next": lr_frames[2] if self.num_frames > 2 else lr_frames[1],
+            "hr_prev": hr_frames[0],
+            "hr_curr": hr_frames[1],
+            "hr_next": hr_frames[2] if self.num_frames > 2 else hr_frames[1],
+        }
+
 def build_dataloader(
     dataset_name: str,
     data_root: str | None,
@@ -377,8 +488,14 @@ def build_dataloader(
             use_precomputed_flow=use_precomputed_flow,
             degradation_mode=degradation_mode,
         )
+    elif name == "game":
+        dataset = GameCaptureDataset(
+            data_root=data_root, scale=scale, split=split, patch_size=patch_size,
+            use_precomputed_flow=use_precomputed_flow,
+            degradation_mode=degradation_mode,
+        )
     else:
-        raise ValueError(f"no {dataset_name}. use either vimeo or REDS")
+        raise ValueError(f"no {dataset_name}. use vimeo, REDS or game")
 
     return torch.utils.data.DataLoader(
         dataset,

@@ -18,7 +18,7 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Temporal SR Network")
-    parser.add_argument("--dataset", type=str, default="vimeo90k", choices=["vimeo90k", "reds", "combined"])
+    parser.add_argument("--dataset", type=str, default="vimeo90k", choices=["vimeo90k", "reds", "combined", "game"])
     parser.add_argument("--flow_estimator", type=str, default="raft", choices=["simple", "raft"])
     parser.add_argument("--data_root", type=str, default=None,
                         help="Required for --dataset vimeo90k or reds. Ignored for combined.")
