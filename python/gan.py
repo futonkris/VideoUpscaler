@@ -4,9 +4,11 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import save_image
 from tqdm import tqdm
 
 from model.network import build_model
@@ -50,6 +52,10 @@ def parse_args():
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume a GAN run from a gan_*.pth checkpoint")
     parser.add_argument("--log_dir", type=str, default="runs_gan")
+    parser.add_argument("--val_sample_dir", type=str, default="val_samples",
+                        help="Where to dump bicubic|SR|HR comparison images each validation epoch")
+    parser.add_argument("--num_val_samples", type=int, default=4,
+                        help="How many fixed validation samples to dump per validation epoch")
     parser.add_argument("--device", type=str, default="auto")
     return parser.parse_args()
 
@@ -173,6 +179,9 @@ def validate_gan(
     flow_estimator: nn.Module,
     dataloader,
     device: torch.device,
+    save_dir: str | None = None,
+    epoch: int = 0,
+    num_save: int = 4,
 ) -> tuple[float, float]:
     generator.eval()
     flow_estimator.eval()
@@ -180,6 +189,12 @@ def validate_gan(
     running_psnr = 0.0
     running_ssim = 0.0
     n_samples = 0
+
+    saved = 0
+    epoch_dir = None
+    if save_dir is not None and num_save > 0:
+        epoch_dir = Path(save_dir) / f"epoch_{epoch:03d}"
+        epoch_dir.mkdir(parents=True, exist_ok=True)
 
     for batch in tqdm(dataloader, desc="Validating", leave=False):
         lr_curr = batch["lr_curr"].to(device)
@@ -197,8 +212,23 @@ def validate_gan(
         prev_sr = hr_prev
 
         sr_output = generator(lr_curr, prev_sr, lr_next, flow_lr_prev, flow_lr_next)
+        sr_clamped = sr_output.clamp(0, 1)
 
-        sr_np = sr_output.clamp(0, 1).cpu().numpy()
+        if epoch_dir is not None and saved < num_save:
+            scale = hr_curr.shape[-1] // lr_curr.shape[-1]
+            bicubic = F.interpolate(
+                lr_curr, scale_factor=scale, mode="bicubic", align_corners=False
+            ).clamp(0, 1)
+            for i in range(sr_clamped.shape[0]):
+                if saved >= num_save:
+                    break
+                triptych = torch.cat(
+                    [bicubic[i], sr_clamped[i], hr_curr[i]], dim=-1
+                )
+                save_image(triptych, epoch_dir / f"sample_{saved:02d}.png")
+                saved += 1
+
+        sr_np = sr_clamped.cpu().numpy()
         hr_np = hr_curr.cpu().numpy()
         for i in range(sr_np.shape[0]):
             sr_img = sr_np[i].transpose(1, 2, 0)
@@ -264,7 +294,7 @@ def main():
     stage1 = torch.load(args.gan_checkpoint, map_location=device, weights_only=True)
     if "model_state_dict" not in stage1:
         raise SystemExit(
-            f"{args.gan_checkpoint} has no 'model_state_dict' key — "
+            f"{args.gan_checkpoint} has no model_state_dict key — "
             f"this should be a model checkpoint from train.py"
         )
     generator.load_state_dict(stage1["model_state_dict"])
@@ -339,7 +369,11 @@ def main():
         )
 
         if (epoch + 1) % 5 == 0 or epoch == 0:
-            val_psnr, val_ssim = validate_gan(generator, flow_estimator, val_loader, device)
+            val_psnr, val_ssim = validate_gan(
+                generator, flow_estimator, val_loader, device,
+                save_dir=args.val_sample_dir, epoch=epoch,
+                num_save=args.num_val_samples,
+            )
             writer.add_scalar("val/psnr", val_psnr, epoch)
             writer.add_scalar("val/ssim", val_ssim, epoch)
             print(
