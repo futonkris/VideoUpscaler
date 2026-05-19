@@ -109,3 +109,15 @@ class CombinedLoss(nn.Module):
 
         loss_dict["total_loss"] = total.item()
         return total, loss_dict
+
+class GANLoss(nn.Module):
+    def __init__(self, real_label: float = 1.0, fake_label: float = 0.0):
+        super().__init__()
+        self.real_label = real_label
+        self.fake_label = fake_label
+        self.loss = nn.BCEWithLogitsLoss()
+
+    def forward(self, pred: torch.Tensor, target_is_real: bool) -> torch.Tensor:
+        label = self.real_label if target_is_real else self.fake_label
+        target = torch.full_like(pred, label)
+        return self.loss(pred, target)
